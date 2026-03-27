@@ -51,6 +51,43 @@ async def test_dlhd_extracts_proxy_server_flow_from_direct_iframe(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dlhd_extracts_proxy_server_flow_from_m3u8_servers_array(monkeypatch):
+    extractor = DLHDExtractor({})
+
+    main_url = "https://dlstreams.top/stream/stream-49.php"
+    iframe_url = "https://yuntracking.co/premiumtv/daddyhd.php?id=49"
+    lookup_url = "https://ai.the-sunmoon.site/server_lookup?channel_id=premium49"
+
+    main_html = '<html><iframe src="https://yuntracking.co/premiumtv/daddyhd.php?id=49"></iframe></html>'
+    iframe_html = (
+        "const CHANNEL_KEY = 'premium49'; "
+        "let M3U8_SERVERS = ['ai.the-sunmoon.site', 'backup.example']; "
+        "let M3U8_SERVER = null;"
+    )
+    lookup_json = '{"server_key":"dokko1"}'
+
+    async def fake_direct(channel_id: str):
+        raise ExtractorError("simulated direct extraction failure")
+
+    async def fake_make_request(url: str, **kwargs):
+        if url == main_url:
+            return _response(main_url, main_html)
+        if url == iframe_url:
+            return _response(iframe_url, iframe_html)
+        if url == lookup_url:
+            return _response(lookup_url, lookup_json)
+        raise AssertionError(f"Unexpected URL requested: {url}")
+
+    monkeypatch.setattr(extractor, "_extract_direct_stream", fake_direct)
+    monkeypatch.setattr(extractor, "_make_request", fake_make_request)
+
+    result = await extractor.extract(main_url)
+
+    assert result["destination_url"] == "https://ai.the-sunmoon.site/proxy/dokko1/premium49/mono.css"
+    assert result["request_headers"]["Referer"] == iframe_url
+
+
+@pytest.mark.asyncio
 async def test_dlhd_player_request_keeps_base_referer(monkeypatch):
     extractor = DLHDExtractor({})
 
@@ -175,3 +212,38 @@ async def test_dlhd_resolves_relative_player_and_iframe_against_document_url(mon
     assert player_url in called_urls
     assert iframe_url in called_urls
     assert result["destination_url"] == "https://ai.the-sunmoon.site/proxy/wind/premium49/mono.css"
+
+
+@pytest.mark.asyncio
+async def test_dlhd_does_not_attempt_new_auth_when_markers_absent(monkeypatch):
+    extractor = DLHDExtractor({})
+
+    main_url = "https://dlstreams.top/stream/stream-49.php"
+    iframe_url = "https://iframe.example/premiumtv/daddyhd.php?id=49"
+
+    main_html = '<html><iframe src="https://iframe.example/premiumtv/daddyhd.php?id=49"></iframe></html>'
+    iframe_html = "const SOME_OTHER_VAR = 'x';"
+
+    async def fake_direct(channel_id: str):
+        raise ExtractorError("simulated direct extraction failure")
+
+    async def fake_proxy_flow(iframe_url: str, iframe_content: str, headers: dict):
+        raise ExtractorError("Not proxy-server flow")
+
+    async def fake_new_auth(iframe_url: str, iframe_content: str, headers: dict):
+        raise AssertionError("new auth flow should not be attempted when markers are absent")
+
+    async def fake_make_request(url: str, **kwargs):
+        if url == main_url:
+            return _response(main_url, main_html)
+        if url == iframe_url:
+            return _response(iframe_url, iframe_html)
+        raise AssertionError(f"Unexpected URL requested: {url}")
+
+    monkeypatch.setattr(extractor, "_extract_direct_stream", fake_direct)
+    monkeypatch.setattr(extractor, "_extract_proxy_server_flow", fake_proxy_flow)
+    monkeypatch.setattr(extractor, "_extract_new_auth_flow", fake_new_auth)
+    monkeypatch.setattr(extractor, "_make_request", fake_make_request)
+
+    with pytest.raises(ExtractorError, match="No compatible DLHD iframe flow"):
+        await extractor.extract(main_url)

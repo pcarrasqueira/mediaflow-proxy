@@ -519,11 +519,23 @@ class DLHDExtractor(BaseExtractor):
         channel_key_match = re.search(r"(?:const|var|let)\s+CHANNEL_KEY\s*=\s*['\"]([^'\"]+)['\"]", iframe_content)
         m3u8_server_match = re.search(r"(?:const|var|let)\s+M3U8_SERVER\s*=\s*['\"]([^'\"]+)['\"]", iframe_content)
 
-        if not channel_key_match or not m3u8_server_match:
-            raise ExtractorError("Not proxy-server flow: missing CHANNEL_KEY or M3U8_SERVER")
+        if not channel_key_match:
+            raise ExtractorError("Not proxy-server flow: missing CHANNEL_KEY")
 
         channel_key = channel_key_match.group(1).strip()
-        m3u8_server = m3u8_server_match.group(1).strip()
+
+        m3u8_server = m3u8_server_match.group(1).strip() if m3u8_server_match else ""
+        if not m3u8_server:
+            servers_array_match = re.search(
+                r"(?:const|var|let)\s+M3U8_SERVERS\s*=\s*\[(.*?)\]",
+                iframe_content,
+                re.DOTALL,
+            )
+            if servers_array_match:
+                server_candidates = re.findall(r"['\"]([a-zA-Z0-9.-]+)['\"]", servers_array_match.group(1))
+                if server_candidates:
+                    m3u8_server = server_candidates[0].strip()
+
         if not channel_key or not m3u8_server:
             raise ExtractorError("Not proxy-server flow: empty CHANNEL_KEY or M3U8_SERVER")
 
@@ -556,6 +568,11 @@ class DLHDExtractor(BaseExtractor):
             "mediaflow_endpoint": "hls_manifest_proxy",
             "force_playlist_proxy": True,
         }
+
+    @staticmethod
+    def _has_new_auth_markers(iframe_content: str) -> bool:
+        required_markers = ("AUTH_TOKEN", "AUTH_COUNTRY", "AUTH_TS", "AUTH_EXPIRY")
+        return all(marker in iframe_content for marker in required_markers)
 
     async def _extract_direct_stream(self, channel_id: str) -> Dict[str, Any]:
         """
@@ -764,15 +781,21 @@ class DLHDExtractor(BaseExtractor):
                     return await self._extract_proxy_server_flow(
                         iframe_candidate, iframe_content, resolved_iframe_headers
                     )
-                except ExtractorError:
-                    pass
+                except ExtractorError as proxy_flow_error:
+                    logger.debug(f"Proxy-server flow not matched for {iframe_candidate}: {proxy_flow_error}")
 
                 if "lovecdn.ru" in iframe_domain:
                     logger.info("Detected lovecdn.ru iframe - using alternative extraction")
                     return await self._extract_lovecdn_stream(iframe_candidate, iframe_content, resolved_iframe_headers)
-                else:
+
+                if self._has_new_auth_markers(iframe_content):
                     logger.info("Attempting new auth flow extraction.")
                     return await self._extract_new_auth_flow(iframe_candidate, iframe_content, resolved_iframe_headers)
+
+                raise ExtractorError(
+                    f"No compatible DLHD iframe flow for {iframe_candidate}: "
+                    "missing proxy-server markers and new-auth markers"
+                )
 
             except Exception as e:
                 logger.warning(f"Failed to process iframe {iframe_candidate}: {e}")
